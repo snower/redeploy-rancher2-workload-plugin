@@ -120,7 +120,7 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         Set<String> workloadPods = new HashSet<>();
         JsonNode root = MAPPER.readTree(response.getEntity().getContent());
         JsonNode pods = root.get("data");
-        for (int i = 0; i < pods.size(); i++) {
+        for (int i = 0; pods != null && i < pods.size(); i++) {
             String podID = pods.get(i).get("id").asText();
             if (podID != null) {
                 workloadPods.add(podID);
@@ -132,7 +132,7 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
 
     private void pollingCheckPodsDeployFinish(PrintStream logger, CloseableHttpClient client, Rancher2Credentials credential, String url, Set<String> lastDeployPods) throws InterruptedException, IOException {
         long startTime = (new Date()).getTime();
-        Thread.sleep(1000);
+        Thread.sleep(5000);
         while (((new Date()).getTime() - startTime) < ((long) pollingDeployTimeout) * 1000) {
             Set<String> deployPods = getWorkloadPods(logger, client, credential, url);
             deployPods.retainAll(lastDeployPods);
@@ -140,7 +140,7 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
                 return;
             }
 
-            Thread.sleep(2000);
+            Thread.sleep(3000);
         }
         throw new AbortException(Messages.Rancher2RedeployBuilder_pollingDeployTimeout((int)(((new Date()).getTime() - startTime)/1000)));
     }
@@ -175,7 +175,7 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
                 currentDeployPods = getWorkloadPods(logger, client, credential, url);
             }
 
-            if (StringUtils.isNotBlank(images)) {
+            if (StringUtils.isBlank(images)) {
                 HttpUriRequest request = RequestBuilder.post(url + "?action=redeploy")
                         .addHeader("Authorization", "Bearer " + credential.getBearerToken())
                         .addHeader("Accept", "application/json")
@@ -237,9 +237,11 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         //annotations
         ObjectNode annotations = (ObjectNode) root.get("annotations");
         String timestamp = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'").format(new Date());
-        annotations.put("cattle.io/timestamp", timestamp);
+        if (annotations != null) {
+            annotations.put("cattle.io/timestamp", timestamp);
+        }
         JsonNode containers = root.get("containers");
-        for (int i = 0; i < containers.size(); i++) {
+        for (int i = 0; containers != null && i < containers.size(); i++) {
             ObjectNode container = (ObjectNode) containers.get(i);
             String oldTag = container.get("image").asText();
             if (oldTag != null) {
