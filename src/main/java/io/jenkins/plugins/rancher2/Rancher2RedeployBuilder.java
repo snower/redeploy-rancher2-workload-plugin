@@ -17,6 +17,7 @@ import hudson.model.TaskListener;
 import hudson.tasks.Builder;
 import hudson.tasks.BuildStepDescriptor;
 import hudson.util.ListBoxModel;
+import io.jenkins.cli.shaded.org.apache.commons.io.IOUtils;
 import jenkins.model.Jenkins;
 import org.apache.commons.lang.StringUtils;
 import org.apache.http.client.methods.CloseableHttpResponse;
@@ -31,9 +32,12 @@ import org.kohsuke.stapler.QueryParameter;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -52,6 +56,8 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
     private final boolean alwaysPull;
     private final boolean pollingDeployFinish;
     private final int pollingDeployTimeout;
+    private final String templateUrl;
+    private final String templateVars;
 
     @DataBoundConstructor
     public Rancher2RedeployBuilder(
@@ -60,7 +66,9 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
             @Nullable String images,
             boolean alwaysPull,
             boolean pollingDeployFinish,
-            int pollingDeployTimeout
+            int pollingDeployTimeout,
+            String templateUrl,
+            String templateVars
     ) {
         this.credential = credential;
         this.workload = workload;
@@ -68,6 +76,8 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         this.alwaysPull = alwaysPull;
         this.pollingDeployFinish = pollingDeployFinish;
         this.pollingDeployTimeout = pollingDeployTimeout;
+        this.templateUrl = templateUrl;
+        this.templateVars = templateVars;
     }
 
     @Nonnull
@@ -96,8 +106,16 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         return pollingDeployTimeout;
     }
 
-    private Set<String> getWorkloadPods(PrintStream logger, CloseableHttpClient client, Rancher2Credentials credential, String url) throws InterruptedException, IOException {
-        String[] urlInfo = url.split("/workloads/");
+    public String getTemplateUrl() {
+        return templateUrl;
+    }
+
+    public String getTemplateVars() {
+        return templateVars;
+    }
+
+    private Set<String> getWorkloadPods(PrintStream logger, CloseableHttpClient client, Rancher2Credentials credential, String url, String selectedState) throws InterruptedException, IOException {
+        String[] urlInfo = url.split("\\/workloads\\/");
         if(urlInfo.length != 2) {
             throw new AbortException(Messages.Rancher2RedeployBuilder_badWorkload(url));
         }
@@ -121,7 +139,11 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         JsonNode root = MAPPER.readTree(response.getEntity().getContent());
         JsonNode pods = root.get("data");
         for (int i = 0; pods != null && i < pods.size(); i++) {
-            String podID = pods.get(i).get("id").asText();
+            JsonNode pod = pods.get(i);
+            String podState = pod.get("state").asText();
+            if (StringUtils.isNotBlank(selectedState) && StringUtils.isNotBlank(podState) &&
+                    !Objects.equals(podState.toLowerCase(), selectedState)) continue;
+            String podID = pod.get("id").asText();
             if (podID != null) {
                 workloadPods.add(podID);
             }
@@ -134,9 +156,23 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         long startTime = (new Date()).getTime();
         Thread.sleep(5000);
         while (((new Date()).getTime() - startTime) < ((long) pollingDeployTimeout) * 1000) {
-            Set<String> deployPods = getWorkloadPods(logger, client, credential, url);
+            Set<String> deployPods = getWorkloadPods(logger, client, credential, url, null);
             deployPods.retainAll(lastDeployPods);
             if(deployPods.size() <= 0) {
+                return;
+            }
+
+            Thread.sleep(3000);
+        }
+        throw new AbortException(Messages.Rancher2RedeployBuilder_pollingDeployTimeout((int)(((new Date()).getTime() - startTime)/1000)));
+    }
+
+    private void pollingWaitPodsDeployFinish(PrintStream logger, CloseableHttpClient client, Rancher2Credentials credential, String url) throws InterruptedException, IOException {
+        long startTime = (new Date()).getTime();
+        Thread.sleep(5000);
+        while (((new Date()).getTime() - startTime) < ((long) pollingDeployTimeout) * 1000) {
+            Set<String> deployPods = getWorkloadPods(logger, client, credential, url, "running");
+            if(deployPods.size() > 0) {
                 return;
             }
 
@@ -172,24 +208,11 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         Set<String> currentDeployPods = null;
         try (CloseableHttpClient client = ClientBuilder.create(endpoint, credential.isTrustCert())) {
             if(pollingDeployFinish) {
-                currentDeployPods = getWorkloadPods(logger, client, credential, url);
+                currentDeployPods = getWorkloadPods(logger, client, credential, url, null);
             }
 
             if (StringUtils.isBlank(images)) {
-                HttpUriRequest request = RequestBuilder.post(url + "?action=redeploy")
-                        .addHeader("Authorization", "Bearer " + credential.getBearerToken())
-                        .addHeader("Accept", "application/json")
-                        .build();
-
-                CloseableHttpResponse response = client.execute(request);
-                if (response.getStatusLine().getStatusCode() != 200) {
-                    throw new AbortException(
-                            Messages.Rancher2RedeployBuilder_badResponse(
-                                    response.getStatusLine().getStatusCode(),
-                                    EntityUtils.toString(response.getEntity())
-                            )
-                    );
-                }
+                putActionRedeploy(logger, client, envVars, credential, url);
             } else {
                 putConfigRedeploy(logger, client, envVars, credential, url);
             }
@@ -201,10 +224,31 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         }
     }
 
+    private void putActionRedeploy(PrintStream logger, CloseableHttpClient client, EnvVars envVars, Rancher2Credentials credential, String url)  throws InterruptedException, IOException {
+        HttpUriRequest request = RequestBuilder.post(url + "?action=redeploy")
+                .addHeader("Authorization", "Bearer " + credential.getBearerToken())
+                .addHeader("Accept", "application/json")
+                .build();
+
+        CloseableHttpResponse response = client.execute(request);
+        if (response.getStatusLine().getStatusCode() != 200) {
+            String message = Messages.Rancher2RedeployBuilder_badResponse(
+                    response.getStatusLine().getStatusCode(),
+                    EntityUtils.toString(response.getEntity())
+            );
+            if (response.getStatusLine().getStatusCode() == 404) {
+                logger.println(message);
+                if(postConfigDeploy(logger, client, envVars, credential, url)) return;
+            }
+            throw new AbortException(message);
+        }
+    }
+
     private void putConfigRedeploy(PrintStream logger, CloseableHttpClient client, EnvVars envVars, Rancher2Credentials credential, String url) throws InterruptedException, IOException {
         Map<String, String> imageTags = new HashMap<>();
+        String expandImages = null;
         if (StringUtils.isNotBlank(images)) {
-            String expandImages = envVars.expand(images);
+            expandImages = envVars.expand(images);
             String[] imageArray = expandImages.split(";");
             for (String imageTag : imageArray) {
                 String name = parseImageName(imageTag);
@@ -221,16 +265,28 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
 
         CloseableHttpResponse response = client.execute(request);
         if (response.getStatusLine().getStatusCode() != 200) {
-            throw new AbortException(
-                    Messages.Rancher2RedeployBuilder_badResponse(
-                            response.getStatusLine().getStatusCode(),
-                            EntityUtils.toString(response.getEntity())
-                    )
+            String message = Messages.Rancher2RedeployBuilder_badResponse(
+                    response.getStatusLine().getStatusCode(),
+                    EntityUtils.toString(response.getEntity())
             );
+            if (response.getStatusLine().getStatusCode() == 404) {
+                logger.println(message);
+                if(postConfigDeploy(logger, client, envVars, credential, url)) return;
+            }
+            throw new AbortException(message);
         }
 
         // modify json body for PUT request
         JsonNode root = MAPPER.readTree(response.getEntity().getContent());
+        JsonNode containers = root.get("containers");
+        if (containers != null && containers.size() > 0) {
+            String oldImage = containers.get(0).get("image").asText();
+            if (Objects.equals(expandImages, oldImage)) {
+                putActionRedeploy(logger, client, envVars, credential, url);
+                return;
+            }
+        }
+
         ObjectNode objectNode = (ObjectNode) root;
         objectNode.remove("actions");
         objectNode.remove("links");
@@ -240,7 +296,6 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         if (annotations != null) {
             annotations.put("cattle.io/timestamp", timestamp);
         }
-        JsonNode containers = root.get("containers");
         for (int i = 0; containers != null && i < containers.size(); i++) {
             ObjectNode container = (ObjectNode) containers.get(i);
             String oldTag = container.get("image").asText();
@@ -273,9 +328,98 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
         CloseableHttpResponse putResponse = client.execute(putRequest);
         if (putResponse.getStatusLine().getStatusCode() != 200) {
             throw new AbortException(Messages.Rancher2RedeployBuilder_badResponse(
-                    response.getStatusLine().getStatusCode(),EntityUtils.toString(response.getEntity())
+                    putResponse.getStatusLine().getStatusCode(),EntityUtils.toString(putResponse.getEntity())
             ));
         }
+    }
+
+    private boolean postConfigDeploy(PrintStream logger, CloseableHttpClient client, EnvVars envVars, Rancher2Credentials credential, String url) throws InterruptedException, IOException {
+        if (StringUtils.isBlank(templateUrl)) return false;
+        String projectId, namespaceId, nameId;
+        String[] urlInfo = url.split("\\/project\\/");
+        urlInfo = urlInfo[1].split("\\/workloads\\/");
+        projectId = urlInfo[0];
+        urlInfo = urlInfo[1].split(":");
+        namespaceId = urlInfo[1];
+        nameId = urlInfo[2];
+
+        String expandTemplateUrl = envVars.expand(templateUrl);
+        logger.println(Messages._Rancher2CredentialsImpl_DescriptorImpl_createPodStartMessage(expandTemplateUrl));
+        JsonNode template = expandTemplateUrl.toLowerCase().startsWith("http") ?
+                loadHttpTemplate(client, envVars, expandTemplateUrl, projectId, namespaceId, nameId) :
+                loadFileTemplate(envVars, expandTemplateUrl, projectId, namespaceId, nameId);
+        if (template == null) {
+            throw new IOException("template error");
+        }
+
+        HttpUriRequest postRequest = RequestBuilder.post(url.split("\\/workloads")[0] + "/workloads")
+                .addHeader("Authorization", "Bearer " + credential.getBearerToken())
+                .addHeader("Accept", "application/json")
+                .addHeader("Content-Type", "application/json; charset=utf-8")
+                .setEntity(new StringEntity(MAPPER.writeValueAsString(template), "utf-8"))
+                .build();
+        CloseableHttpResponse postResponse = client.execute(postRequest);
+        String postResponseContent = EntityUtils.toString(postResponse.getEntity());
+        logger.println(Messages._Rancher2CredentialsImpl_DescriptorImpl_createPodSuccedMessage(postResponse.getStatusLine(), postResponseContent));
+        if (postResponse.getStatusLine().getStatusCode() == 201) {
+            if(pollingDeployFinish) {
+                pollingWaitPodsDeployFinish(logger, client, credential, url);
+            }
+            return true;
+        }
+        if (postResponse.getStatusLine().getStatusCode() != 200) {
+            throw new AbortException(Messages.Rancher2RedeployBuilder_badResponse(
+                    postResponse.getStatusLine().getStatusCode(), postResponseContent));
+        }
+        return true;
+    }
+
+    private JsonNode loadHttpTemplate(CloseableHttpClient client, EnvVars envVars, String url, String projectId, String namespaceId, String nameId) throws InterruptedException, IOException {
+        HttpUriRequest request = RequestBuilder.get(url)
+                .addHeader("Accept", "application/json")
+                .build();
+
+        CloseableHttpResponse response = client.execute(request);
+        if (response.getStatusLine().getStatusCode() != 200) {
+            throw new AbortException(
+                    Messages.Rancher2RedeployBuilder_badResponse(
+                            response.getStatusLine().getStatusCode(),
+                            EntityUtils.toString(response.getEntity())
+                    )
+            );
+        }
+        String content = EntityUtils.toString(response.getEntity());
+        return MAPPER.readTree(compileTemplate(envVars, projectId, namespaceId, nameId, content));
+    }
+
+    private JsonNode loadFileTemplate(EnvVars envVars, String filename, String projectId, String namespaceId, String nameId) throws InterruptedException, IOException {
+        File file = new File(filename);
+        FileInputStream fileInputStream = new FileInputStream(file);
+        String content = IOUtils.toString(fileInputStream, StandardCharsets.UTF_8);
+        fileInputStream.close();
+        return MAPPER.readTree(compileTemplate(envVars, projectId, namespaceId, nameId, content));
+    }
+
+    private String compileTemplate(EnvVars envVars, String projectId, String namespaceId, String nameId, String templateContent) {
+        String expandTemplateVars = envVars.expand(templateVars);
+        Map<String, String> vars = new HashMap<>();
+        vars.put("PROJECTID", projectId);
+        vars.put("NAMESPACEID", namespaceId);
+        vars.put("NAMEID", nameId);
+        if (StringUtils.isNotBlank(images)) {
+            vars.put("IMAGE", images.split(";")[0]);
+        }
+        vars.put("IMAGEPULLPOLICY", alwaysPull ? "Always" : "IfNotPresent");
+
+        if (StringUtils.isNotBlank(templateVars)) {
+            for (String varValue : expandTemplateVars.split(",")) {
+                String[] varValues = varValue.split("=");
+                if (varValues.length >= 2) {
+                    vars.put(varValues[0], varValues[1]);
+                }
+            }
+        }
+        return Util.replaceMacro(templateContent, vars);
     }
 
     /**

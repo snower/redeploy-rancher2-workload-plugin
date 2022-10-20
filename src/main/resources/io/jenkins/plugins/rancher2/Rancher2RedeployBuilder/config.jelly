@@ -18,4 +18,10 @@
     <f:entry title="${%PollingDeployTimeout}" field="pollingDeployTimeout">
         <f:textbox default="300" />
     </f:entry>
+    <f:entry title="${%templateUrl}" field="templateUrl">
+        <f:textbox default="" />
+    </f:entry>
+    <f:entry title="${%templateVars}" field="templateVars">
+        <f:textbox default="" />
+    </f:entry>
 </j:jelly>
