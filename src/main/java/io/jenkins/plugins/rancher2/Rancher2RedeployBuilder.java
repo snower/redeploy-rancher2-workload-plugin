@@ -7,6 +7,7 @@ import com.cloudbees.plugins.credentials.domains.DomainRequirement;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.*;
 import hudson.model.Item;
 import hudson.security.ACL;
@@ -182,9 +183,8 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
     }
 
     @Override
-    public void perform(Run<?, ?> run, FilePath workspace, Launcher launcher, TaskListener listener) throws InterruptedException, IOException {
+    public void perform(@NonNull Run<?, ?> run, @NonNull FilePath workspace, @NonNull EnvVars envVars, @NonNull Launcher launcher, @NonNull TaskListener listener) throws InterruptedException, IOException {
         PrintStream logger = listener.getLogger();
-        EnvVars envVars = run.getEnvironment(listener);
         String credentialId = envVars.expand(this.credential);
 
         Rancher2Credentials credential = CredentialsProvider.findCredentialById(
@@ -401,17 +401,20 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
     }
 
     private String compileTemplate(EnvVars envVars, String projectId, String namespaceId, String nameId, String templateContent) {
-        String expandTemplateVars = envVars.expand(templateVars);
         Map<String, String> vars = new HashMap<>();
         vars.put("PROJECTID", projectId);
         vars.put("NAMESPACEID", namespaceId);
         vars.put("NAMEID", nameId);
         if (StringUtils.isNotBlank(images)) {
-            vars.put("IMAGE", images.split(";")[0]);
+            String expandImages = envVars.expand(images);
+            if (StringUtils.isNotBlank(expandImages)) {
+                vars.put("IMAGE", expandImages.split(";")[0]);
+            }
         }
         vars.put("IMAGEPULLPOLICY", alwaysPull ? "Always" : "IfNotPresent");
 
         if (StringUtils.isNotBlank(templateVars)) {
+            String expandTemplateVars = envVars.expand(templateVars);
             for (String varValue : expandTemplateVars.split(",")) {
                 String[] varValues = varValue.split("=");
                 if (varValues.length >= 2) {
