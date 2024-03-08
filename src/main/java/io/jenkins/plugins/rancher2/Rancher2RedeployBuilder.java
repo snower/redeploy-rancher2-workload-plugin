@@ -29,6 +29,7 @@ import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.util.EntityUtils;
 import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
 
 import javax.annotation.Nonnull;
@@ -50,34 +51,46 @@ public class Rancher2RedeployBuilder extends Builder implements SimpleBuildStep 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Nonnull
-    private String credential;
+    private final String credential;
     @Nonnull
     private final String workload;
     private final String images;
     private final boolean alwaysPull;
-    private final boolean pollingDeployFinish;
-    private final int pollingDeployTimeout;
-    private final String templateUrl;
-    private final String templateVars;
+    private boolean pollingDeployFinish = false;
+    private int pollingDeployTimeout = 300;
+    private String templateUrl = null;
+    private String templateVars = null;
 
     @DataBoundConstructor
     public Rancher2RedeployBuilder(
             @Nonnull String credential,
             @Nonnull String workload,
             @Nullable String images,
-            boolean alwaysPull,
-            boolean pollingDeployFinish,
-            int pollingDeployTimeout,
-            String templateUrl,
-            String templateVars
+            boolean alwaysPull
     ) {
         this.credential = credential;
         this.workload = workload;
         this.images = images;
         this.alwaysPull = alwaysPull;
-        this.pollingDeployFinish = pollingDeployFinish;
-        this.pollingDeployTimeout = pollingDeployTimeout;
+    }
+
+    @DataBoundSetter
+    public void setPollingDeployFinish(@Nullable Boolean pollingDeployFinish) {
+        this.pollingDeployFinish = pollingDeployFinish != null && pollingDeployFinish;
+    }
+
+    @DataBoundSetter
+    public void setPollingDeployTimeout(@Nullable Integer pollingDeployTimeout) {
+        this.pollingDeployTimeout = pollingDeployTimeout == null ? 300 : pollingDeployTimeout;
+    }
+
+    @DataBoundSetter
+    public void setTemplateUrl(@Nullable String templateUrl) {
         this.templateUrl = templateUrl;
+    }
+
+    @DataBoundSetter
+    public void setTemplateVars(@Nullable String templateVars) {
         this.templateVars = templateVars;
     }
 
